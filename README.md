@@ -7,4 +7,4 @@ O objectivo é implementar a ficha 2 utilizando imagens docker. Para além disso
 - [ ] MULTICAST do servidor para os clientes 
 - [ ] Routers NAT 
 - [ ] Switches
-- [ ] Imagens docker
+- [ ] Imagens docker e Projecto GNS3

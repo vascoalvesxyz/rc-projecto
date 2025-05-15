@@ -10,10 +10,15 @@
 #include <arpa/inet.h>
 #include <unistd.h>
 
-#define MULTICAST_GROUP "239.0.0.1"
-#define PORT 12345
+int main(int argc, char *argv[] ) {
 
-int main() {
+    char *addr = argv[1]
+    int port = atoi(argv[2]);
+
+    if (argc != 3 || port < 1) {
+        perror("servidor [hostname] [port]");
+        exit(EXIT_FAILURE);
+    }
 
     int sock;
     struct sockaddr_in multicast_addr;
@@ -29,8 +34,8 @@ int main() {
     /* configurar socket */
     memset(&multicast_addr, 0, sizeof(multicast_addr));
     multicast_addr.sin_family = AF_INET;
-    multicast_addr.sin_addr.s_addr = inet_addr(MULTICAST_GROUP);
-    multicast_addr.sin_port = htons(PORT);
+    multicast_addr.sin_addr.s_addr = inet_addr(argv[1]);
+    multicast_addr.sin_port = htons(port);
 
     /* ativar multicast */
     int enable = 1; 

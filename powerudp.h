@@ -46,11 +46,6 @@ typedef struct {
     char psk[64];   // Chave pré-definida para autenticação
 } PU_RegisterMessage;
 
-typedef struct Threads {
-  int client_fd;
-  struct sockaddr_in multicast_addr;
-  int udp_sock;
-} Threads;
 // Inicializa a stack de comunicação e regista-se no servidor
 int pu_init_protocol(const char *server_ip, int server_port, const char *psk);
 

@@ -21,11 +21,12 @@
 
 #define SV_IP   "193.137.101.1"
 #define SV_PORT 443
+
 #define PSK     "337b8d2c1e132acd75171f1acf0e73b20bc9541720d5003813f59ef0ad51f86f"
 
 PU_ConfigMessage config; 
 
-static uint64_t current_seq = 0;
+// static uint64_t current_seq = 0;
 
 /* PowerUDP */
 int  pu_init_protocol(const char *server_ip, int server_port, const char *psk);
@@ -42,7 +43,7 @@ int pu_init_protocol(const char *server_ip, int server_port, const char *psk) {
 
   struct sockaddr_in sv_addr;
   int sv_sock;
-  int udp_sock;
+  // int udp_sock;
 
   /* TCP socket para comunicr com o server */
   sv_sock = socket(AF_INET, SOCK_STREAM, 0);
@@ -90,7 +91,7 @@ int pu_init_protocol(const char *server_ip, int server_port, const char *psk) {
     close(sv_sock);
     return -1;
   }
-  else if (recvlen < sizeof(PU_ConfigMessage)) {
+  else if (recvlen < (int) sizeof(PU_ConfigMessage)) {
     fputs("Recieved malformed config.", stderr);
     close(sv_sock);
     return -1;
@@ -103,98 +104,100 @@ int pu_init_protocol(const char *server_ip, int server_port, const char *psk) {
   return 0;
 }
 
-int pu_send_message(const char *destination, const char *message, int len) {
-
-  int retries = 0;
-
-  assert(config.base_timeout > 0);
-
-  struct timeval tv;
-  tv.tv_sec = config.base_timeout / 1000;
-  tv.tv_usec = (config.base_timeout % 1000) * 1000;
-
-  /* Construir pacote */
-  PU_Header header;
-  char packet[sizeof(header) + len];
-
-  assert(config.max_retries > 0);
-
-  while (retries < config.max_retries) {
-    // Preencher header
-    struct timeval now;
-    // gettimeofday(&now, NULL);
-
-    header.timestamp = now.tv_sec * 1000000 + now.tv_usec;
-    header.sequence = current_seq;
-    header.flag = 0;
-
-    /* Calcular checksum */
-    memcpy(packet, &header, sizeof(header));
-    memcpy(packet + sizeof(header), message, len);
-    header.checksum = htobe16(pu_checksum_helper(packet, sizeof(header) + len));
-    memcpy(packet, &header, sizeof(header));
-
-    // Enviar
-    ssize_t sent = sendto(sockfd, packet, sizeof(packet), 0,
-                          (struct sockaddr*)dest_addr, sizeof(*dest_addr));
-    if (sent != sizeof(packet)) {
-      perror("sendto() failed");
-      return -1;
-    }
-
-    // Esperar ACK
-    fd_set readset;
-    FD_ZERO(&readset);
-    FD_SET(sockfd, &readset);
-
-    int ready = select(sockfd + 1, &readset, NULL, NULL, &tv);
-    if (ready > 0) {
-
-      PU_Header ack_header;
-      struct sockaddr_in src_addr;
-      socklen_t addr_len = sizeof(src_addr);
-
-      ssize_t recvd = recvfrom(sockfd, &ack_header, sizeof(ack_header), 0, (struct sockaddr*)&src_addr, &addr_len);
-
-      if (recvd == sizeof(ack_header) && 
-        (PU_IS_ACK(ack_header.flag)) && 
-        be32toh(ack_header.sequence) == current_seq) {
-        current_seq++;
-        return 0; // Sucesso
-      }
-    } else if (ready == 0) {
-      retries++;
-      fprintf(stderr, "Timeout, retrying (%d/%d)\n", retries, config.max_retries);
-    } else {
-      perror("select() failed");
-      return -1;
-    }
-  }
-
-  fprintf(stderr, "Max retries reached\n");
-  return -1;
-}
-
+// int pu_send_message(const char *destination, const char *message, int len) {
+//
+//   int retries = 0;
+//
+//   assert(config.base_timeout > 0);
+//
+//   struct timeval tv;
+//   tv.tv_sec = config.base_timeout / 1000;
+//   tv.tv_usec = (config.base_timeout % 1000) * 1000;
+//
+//   /* Construir pacote */
+//   PU_Header header;
+//   char packet[sizeof(header) + len];
+//
+//   assert(config.max_retries > 0);
+//
+//   while (retries < config.max_retries) {
+//     // Preencher header
+//     struct timeval now;
+//     // gettimeofday(&now, NULL);
+//
+//     header.timestamp = now.tv_sec * 1000000 + now.tv_usec;
+//     header.sequence = current_seq;
+//     header.flag = 0;
+//
+//     /* Calcular checksum */
+//     memcpy(packet, &header, sizeof(header));
+//     memcpy(packet + sizeof(header), message, len);
+//     header.checksum = htobe16(pu_checksum_helper(packet, sizeof(header) + len));
+//     memcpy(packet, &header, sizeof(header));
+//
+//     // Enviar
+//     ssize_t sent = sendto(sockfd, packet, sizeof(packet), 0,
+//                           (struct sockaddr*)dest_addr, sizeof(*dest_addr));
+//     if (sent != sizeof(packet)) {
+//       perror("sendto() failed");
+//       return -1;
+//     }
+//
+//     // Esperar ACK
+//     fd_set readset;
+//     FD_ZERO(&readset);
+//     FD_SET(sockfd, &readset);
+//
+//     int ready = select(sockfd + 1, &readset, NULL, NULL, &tv);
+//     if (ready > 0) {
+//
+//       PU_Header ack_header;
+//       struct sockaddr_in src_addr;
+//       socklen_t addr_len = sizeof(src_addr);
+//
+//       ssize_t recvd = recvfrom(sockfd, &ack_header, sizeof(ack_header), 0, (struct sockaddr*)&src_addr, &addr_len);
+//
+//       if (recvd == sizeof(ack_header) && 
+//         (PU_IS_ACK(ack_header.flag)) && 
+//         be32toh(ack_header.sequence) == current_seq) {
+//         current_seq++;
+//         return 0; // Sucesso
+//       }
+//     } else if (ready == 0) {
+//       retries++;
+//       fprintf(stderr, "Timeout, retrying (%d/%d)\n", retries, config.max_retries);
+//     } else {
+//       perror("select() failed");
+//       return -1;
+//     }
+//   }
+//
+//   fprintf(stderr, "Max retries reached\n");
+//   return -1;
+// }
+//
 int main(int argc, char *argv[] ) {
 
   /* Verificar argumentos */
   char *addr = argv[1];
-  char *msg = argv[2];
+  int port = atoi(argv[2]);
 
-  if (argc != 3) {
-    perror("cliente [hostname:port] [mensagem]");
+  // char *msg = argv[2];
+
+  if (argc != 4) {
+    perror("cliente [hostname] [port] [mensagem]");
     exit(EXIT_FAILURE);
   }
 
   /* Registar no servidor */ 
-  if (pu_init_protocol(SV_IP, SV_PORT, PSK) < 0) {
+  if (pu_init_protocol(addr, port, PSK) < 0) {
     fputs("[ERROR] Failed to initialize PowerUDP\n", stderr);
     exit(EXIT_FAILURE);
   }
 
-  pu_send_message(addr, , int len)
+  // pu_send_message(addr, , int len)
 
   /* Fechar registo no servidor */
-  pu_close_protocol();
+  // pu_close_protocol();
   return 0;
 }

@@ -1,15 +1,19 @@
 #ifndef _POWERUDP_
 #define _POWERUDP_
 
+#include <netinet/in.h>
 #include <stdint.h>
 #include <stdio.h>
 
 /* Os clientes devem suportar o protocolo PowerUDP, cujas funcionalidades devem
  * ser suportadas em linha com a API descrita mais à frente.
- * O PowerUDP permitirá suportar as seguintes funcionalidades: 
-1. Registo da aplicação cliente no servidor, com recurso a chave pré-configurada; 
-2. Envio para o servidor de pedidos de alteração à configuração do protocolo ativa na rede; 
-3. Envio e receção de mensagens UDP para outros hosts, com garantias de confiabilidade de acordo com a configuração ativa; */
+ * O PowerUDP permitirá suportar as seguintes funcionalidades:
+1. Registo da aplicação cliente no servidor, com recurso a chave
+pré-configurada;
+2. Envio para o servidor de pedidos de alteração à configuração do protocolo
+ativa na rede;
+3. Envio e receção de mensagens UDP para outros hosts, com garantias de
+confiabilidade de acordo com a configuração ativa; */
 
 /* Definição dos flags (usando bits distintos) */
 #define PU_DATA     0b10000000  // Bit 7 (1 << 7)
@@ -42,6 +46,11 @@ typedef struct {
     char psk[64];   // Chave pré-definida para autenticação
 } PU_RegisterMessage;
 
+typedef struct Threads {
+  int client_fd;
+  struct sockaddr_in multicast_addr;
+  int udp_sock;
+} Threads;
 // Inicializa a stack de comunicação e regista-se no servidor
 int pu_init_protocol(const char *server_ip, int server_port, const char *psk);
 

@@ -36,7 +36,7 @@ static int multicast_sock;
 static int tcp_sock;
 static volatile sig_atomic_t running = 1;
 
-static void handle_signal(int sig) { running = 0; }
+static void handle_signal() { running = 0; }
 static bool setup_multicast(const char *group, int port);
 static bool setup_tcp(const char *bind_addr, int port, int backlog);
 void *handle_client(void *arg);

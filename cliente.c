@@ -24,6 +24,9 @@
 #define SV_IP   "193.137.101.1"
 #define SV_PORT 443
 
+#define MULTICAST_GROUP "239.255.0.1"
+#define MULTICAST_PORT 54321
+
 #define PSK     "337b8d2c1e132acd75171f1acf0e73b20bc9541720d5003813f59ef0ad51f86f"
 
 PU_ConfigMessage config = {0}; 
@@ -223,8 +226,8 @@ int main(int argc, char *argv[] ) {
   }
 
   // pu_send_message(addr, , int len)
-
   /* Fechar registo no servidor */
   // pu_close_protocol();
+
   return 0;
 }

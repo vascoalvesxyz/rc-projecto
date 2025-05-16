@@ -54,16 +54,17 @@ int main(int argc, char *argv[]) {
     exit(EXIT_FAILURE);
   }
     
-  fd_set read_fds;
-  struct timeval tv;
-
   struct sigaction sa = {
       .sa_handler = handle_signal,
       .sa_flags = SA_RESTART
   };
+
   sigemptyset(&sa.sa_mask);
   sigaction(SIGINT, &sa, NULL);
   sigaction(SIGTERM, &sa, NULL);
+
+  fd_set read_fds;
+  struct timeval tv;
 
   while (running) {
     FD_ZERO(&read_fds);

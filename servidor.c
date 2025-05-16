@@ -30,7 +30,7 @@ typedef struct ThreadArgs {
   int client_fd;
 } ThreadArgs;
 
-static PU_ConfigMessage config;
+static PU_ConfigMessage config = {10, 1, 1, 1, 10};
 static pthread_mutex_t mutex = PTHREAD_MUTEX_INITIALIZER;
 static int multicast_sock;
 static int tcp_sock;
@@ -125,8 +125,10 @@ static bool setup_tcp(const char *bind_addr, int port, int backlog) {
   }
 
   /* dar bind ao host e port */
-  struct sockaddr_in server_addr = {.sin_family = AF_INET,
-                                    .sin_port = htons(port)};
+  struct sockaddr_in server_addr = {
+    .sin_family = AF_INET,
+    .sin_port = htons(port)
+  };
 
   if (inet_pton(AF_INET, bind_addr, &server_addr.sin_addr) != 1) {
     fprintf(stderr, "Invalid bind address: %s\n", bind_addr);

@@ -1,28 +1,25 @@
 /* O cliente comunica com outros clientes via PowerUDP.
  * O cliente comunica via TCP para pedir uma nova configuração ao Servidor.
  * */
-
+#define _GNU_SOURCE
+#define _POSIX_C_SOURCE 200809L
 #include <arpa/inet.h>
 #include <assert.h>
-#include <netinet/in.h>
-#include <stdio.h>
-#include <stdlib.h>
-#include <string.h>
-#include <strings.h>
-#include <unistd.h>
-
-#include "powerudp.h"
-
-#include <arpa/inet.h>
 #include <endian.h>
+#include <netinet/in.h>
+#include <pthread.h>
+#include <signal.h>
 #include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <strings.h>
 #include <sys/socket.h>
-#include <unistd.h>
-
 #include <sys/time.h>
+#include <sys/types.h>
+#include <time.h>
+#include <unistd.h>
+#include "powerudp.h"
 
 #define SV_IP "193.137.101.1"
 #define SV_PORT 443
@@ -32,15 +29,20 @@
 
 #define PSK     "337b8d2c1e132acd75171f1acf0e73b20bc9541720d5003813f59ef0ad51f86f"
 
-PU_ConfigMessage config = {0};
-static uint64_t current_seq = 0;
-
 typedef struct {
-  struct sockaddr_in sv_addr;
   int sv_sock;
+  int mc_sock;
 } global_t;
 
-global_t global;
+static global_t global;
+static PU_ConfigMessage config = {0};
+static uint64_t current_seq = 0;
+static volatile sig_atomic_t running = 1;
+
+/* Helpers */
+static void* thread_multicast_listener(void* arg);
+static void setup_multicast();
+static void handle_sigint();
 
 /* PowerUDP */
 int pu_init_protocol(const char *server_ip, int server_port, const char *psk);
@@ -52,16 +54,87 @@ int pu_receive_message(char *buffer, int bufsize);
 int pu_get_last_message_stats(int *retransmissions, int *delivery_time);
 void pu_inject_packet_loss(int probability);
 
-// static bool config_is_set() {
-//
-//   PU_ConfigMessage empty_config = {0};
-//   if (memcmp((void *)&empty_config, (void *)&config,
-//              sizeof(PU_ConfigMessage))) {
-//     return true;
-//   }
-//
-//   return false;
-// }
+static void* thread_multicast_listener(void* arg) {
+  (void)arg;
+
+  setup_multicast();
+  assert(global.mc_sock > 0);
+
+  PU_ConfigMessage new_config;
+  struct sockaddr_in src_addr;
+  socklen_t addr_len = sizeof(src_addr);
+
+  while (running) {  
+    ssize_t len = recvfrom(global.mc_sock,  &new_config, sizeof(new_config), 0, (struct sockaddr*)&src_addr, &addr_len);
+    if (!running) break;
+    
+    if (len < 0) {
+      perror("[Multicast Listener] recvfrom() failed");
+      continue;
+    }
+
+    if (len != sizeof(new_config)) {
+      fprintf(stderr, "[Multicast Listener] Received incomplete config (%zd/%zu bytes)\n", len, sizeof(new_config));
+      continue;
+    }
+
+    /* Process multicast message */
+    char ip_str[INET_ADDRSTRLEN];
+    inet_ntop(AF_INET, &src_addr.sin_addr, ip_str, sizeof(ip_str));
+    printf("[Multicast Listener] Received multicast from %s:%d\n", ip_str, ntohs(src_addr.sin_port));
+    printf("[Multicast Listener] New config: Timeout=%d\tBackoff=%d\tRetransmission=%d\tSequence=%d\tMax_Retries=%d\n",
+      new_config.base_timeout, new_config.enable_backoff, new_config.enable_retransmission, new_config.enable_sequence, new_config.max_retries);
+
+    memcpy(&config, &new_config, sizeof(config));
+  }
+
+  if (global.mc_sock > 0)
+    close(global.mc_sock);
+  pthread_exit(NULL);
+}
+
+static void setup_multicast() {
+  /* multicast sock */
+  global.mc_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+  if (global.mc_sock < 0) {
+    perror("[Multicast Listener] Multicast socket creation failed");
+    pthread_exit(NULL);
+  }
+
+  /* reuse */
+  int reuse = 1;
+  if (setsockopt(global.mc_sock, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) < 0) {
+    perror("[Multicast Listener] setsockopt(SO_REUSEADDR) failed");
+    close(global.mc_sock);
+    pthread_exit(NULL);
+  }
+
+  /* usar grupo predefinido */
+  struct sockaddr_in addr = {
+    .sin_family = AF_INET,
+    .sin_port = htons(MULTICAST_PORT),
+    .sin_addr.s_addr = INADDR_ANY
+  };
+
+  /* bind */
+  if (bind(global.mc_sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+    perror("[Multicast Listener] Multicast bind failed");
+    close(global.mc_sock);
+    pthread_exit(NULL);
+  }
+
+  /* mreq */
+  struct ip_mreq mreq;
+  mreq.imr_multiaddr.s_addr = inet_addr(MULTICAST_GROUP);
+  mreq.imr_interface.s_addr = INADDR_ANY; 
+  if (setsockopt(global.mc_sock, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(struct ip_mreq)) < 0) {
+    perror("[Multicast Listener] Join multicast group failed");
+    close(global.mc_sock);
+    pthread_exit(NULL);
+  }
+
+  puts("[Multicast Listener] Joined multicast group!");
+}
 
 /* Init protocol */
 int pu_init_protocol(const char *server_ip, int server_port, const char *psk) {
@@ -74,17 +147,20 @@ int pu_init_protocol(const char *server_ip, int server_port, const char *psk) {
   }
 
   /* address do servidor */
-  global.sv_addr.sin_family = AF_INET;
-  global.sv_addr.sin_port = htons(server_port);
-  if (inet_pton(AF_INET, server_ip, &global.sv_addr.sin_addr) <= 0) {
+  struct sockaddr_in sv_addr = {
+    .sin_family = AF_INET,
+    .sin_port = htons(server_port)
+  };
+
+  if (inet_pton(AF_INET, server_ip, &sv_addr.sin_addr) <= 0) {
     fputs("Invalid server address", stderr);
     close(global.sv_sock);
     return -1;
   }
 
   /* ligar ao servidor */
-  if (connect(global.sv_sock, (struct sockaddr *)&global.sv_addr,
-              sizeof(global.sv_addr)) < 0) {
+  if (connect(global.sv_sock, (struct sockaddr *)&sv_addr,
+              sizeof(sv_addr)) < 0) {
     fputs("TCP connection failed", stderr);
     close(global.sv_sock);
     return -1;
@@ -146,6 +222,7 @@ int pu_send_message(const char *destination, const char *message, int len) {
 
   int sockfd = socket(AF_INET, SOCK_DGRAM, 0);
   struct sockaddr_in dest_addr;
+  memset(&dest_addr, 0, sizeof(struct sockaddr_in));
   dest_addr.sin_family = AF_INET;
   dest_addr.sin_port = htons(port);
   inet_pton(AF_INET, ip, &dest_addr.sin_addr);
@@ -233,7 +310,7 @@ int main(int argc, char *argv[]) {
   char *addr = argv[1];
   int port = atoi(argv[2]);
 
-  char *msg = argv[3];
+  // char *msg = argv[3];
 
   if (argc != 4) {
     perror("cliente [hostname] [port] [mensagem]");
@@ -245,14 +322,38 @@ int main(int argc, char *argv[]) {
     fputs("[ERROR] Failed to initialize PowerUDP\n", stderr);
     exit(EXIT_FAILURE);
   }
-  char destination[64];
 
-  snprintf(destination, sizeof(destination), "%s:%d", addr, port);
+  struct sigaction sa = {.sa_handler = handle_sigint, .sa_flags = SA_RESTART};
+  sigemptyset(&sa.sa_mask);
+  sigaction(SIGINT, &sa, NULL);
+  sigaction(SIGTERM, &sa, NULL);
 
-  pu_send_message(destination, msg, strlen(msg));
+  pthread_t multicast_listener;
+  pthread_create(&multicast_listener, 0, thread_multicast_listener, NULL);
+
+  // char destination[64];
+  // snprintf(destination, sizeof(destination), "%s:%d", addr, port);
+  // pu_send_message(destination, msg, strlen(msg));
+
+  while (running) {
+    pause();
+    if (!running) break;
+  }
+
+  puts("Waiting for multicast listener to join...");
+  running = 0;
+  pthread_join(multicast_listener, NULL);
 
   /* Fechar registo no servidor */
   // pu_close_protocol();
 
+  puts("Exited cleanly.");
   return 0;
+}
+
+static void handle_sigint() {
+  puts("SIGINT RECIEVED");
+  shutdown(global.mc_sock, SHUT_RDWR);
+  close(global.mc_sock);
+  running = 0;
 }

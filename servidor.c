@@ -9,6 +9,8 @@
 #include <fcntl.h>
 #include <netinet/in.h>
 #include <pthread.h>
+#include <signal.h>
+#include <stdbool.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -16,8 +18,6 @@
 #include <sys/socket.h>
 #include <sys/types.h>
 #include <unistd.h>
-#include <stdbool.h>
-#include <signal.h>
 
 #include "powerudp.h"
 
@@ -49,15 +49,13 @@ int main(int argc, char *argv[]) {
 
   char *tcp_bind_ip = argv[1];
   int tcp_port = atoi(argv[2]);
-  
-  if ( !setup_tcp(tcp_bind_ip, tcp_port, 10) || !setup_multicast(MULTICAST_GROUP, MULTICAST_PORT) ) {
+
+  if (!setup_tcp(tcp_bind_ip, tcp_port, 10) ||
+      !setup_multicast(MULTICAST_GROUP, MULTICAST_PORT)) {
     exit(EXIT_FAILURE);
   }
-    
-  struct sigaction sa = {
-      .sa_handler = handle_signal,
-      .sa_flags = SA_RESTART
-  };
+
+  struct sigaction sa = {.sa_handler = handle_signal, .sa_flags = SA_RESTART};
 
   sigemptyset(&sa.sa_mask);
   sigaction(SIGINT, &sa, NULL);
@@ -86,7 +84,8 @@ int main(int argc, char *argv[]) {
       }
 
       socklen_t client_len = sizeof(args->client_addr);
-      args->client_fd = accept(tcp_sock, (struct sockaddr *)&args->client_addr, &client_len);
+      args->client_fd =
+          accept(tcp_sock, (struct sockaddr *)&args->client_addr, &client_len);
       puts("accepted client");
 
       if (args->client_fd < 0) {
@@ -112,7 +111,7 @@ int main(int argc, char *argv[]) {
 
 static bool setup_tcp(const char *bind_addr, int port, int backlog) {
   /* verifica que o port é valido */
-  if (port < 0 || port > 65535) 
+  if (port < 0 || port > 65535)
     return false;
 
   /* criar socket tcp */
@@ -123,10 +122,8 @@ static bool setup_tcp(const char *bind_addr, int port, int backlog) {
   }
 
   /* dar bind ao host e port */
-  struct sockaddr_in server_addr = {
-    .sin_family = AF_INET,
-    .sin_port = htons(port)
-  };
+  struct sockaddr_in server_addr = {.sin_family = AF_INET,
+                                    .sin_port = htons(port)};
 
   if (inet_pton(AF_INET, bind_addr, &server_addr.sin_addr) != 1) {
     fprintf(stderr, "Invalid bind address: %s\n", bind_addr);
@@ -134,6 +131,12 @@ static bool setup_tcp(const char *bind_addr, int port, int backlog) {
     return false;
   }
 
+  if (bind(tcp_sock, (struct sockaddr *)&server_addr, sizeof(server_addr)) <
+      0) {
+    perror("bind() failed");
+    close(tcp_sock);
+    return false;
+  }
   /* ouvir */
   if (listen(tcp_sock, backlog) < 0) {
     perror("listen() failed");
@@ -145,7 +148,6 @@ static bool setup_tcp(const char *bind_addr, int port, int backlog) {
   return true;
 }
 
-
 static bool setup_multicast(const char *group, int port) {
   /* criar socket */
   multicast_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
@@ -156,7 +158,8 @@ static bool setup_multicast(const char *group, int port) {
 
   /* mudar time-to-live */
   int ttl = 32;
-  if (setsockopt(multicast_sock, IPPROTO_IP, IP_MULTICAST_TTL, &ttl, sizeof(ttl))) {
+  if (setsockopt(multicast_sock, IPPROTO_IP, IP_MULTICAST_TTL, &ttl,
+                 sizeof(ttl))) {
     perror("setup_multicast: setsockopt(TTL) failed");
     close(multicast_sock);
     return false;
@@ -168,7 +171,7 @@ static bool setup_multicast(const char *group, int port) {
   multicast_addr.sin_family = AF_INET;
   multicast_addr.sin_port = htons(port);
 
-  /* validar endereço */ 
+  /* validar endereço */
   if (inet_pton(AF_INET, group, &multicast_addr.sin_addr) != 1) {
     fprintf(stderr, "setup_multicast: invalid multicast address: %s\n", group);
     close(multicast_sock);
@@ -200,7 +203,7 @@ void *handle_client(void *arg) {
 
   printf("Autenticado!\n");
 
-  thread_exit:
+thread_exit:
   close(args->client_fd);
   free(args);
   return NULL;

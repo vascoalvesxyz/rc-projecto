@@ -85,8 +85,9 @@ static void *thread_receive_loop(void *arg) {
       fflush(stdout);
     }
   }
-  pthread_exit(NULL);
 
+  puts("[PowerUDP Listener] Exited.");
+  pthread_exit(NULL);
 }
 
 static void *thread_multicast_listener(void *arg) {
@@ -314,7 +315,7 @@ int pu_send_message(const char *destination, const char *message, int len) {
   struct timeval now;
 
   while (retries < config.max_retries) {
-    
+
     /* Timeout para o select (NÃO CONFUNDIR COM O TIMESTAMP) */
     timeout = (struct timeval) {
       .tv_sec  = config.base_timeout / 1000,
@@ -345,8 +346,8 @@ int pu_send_message(const char *destination, const char *message, int len) {
     fd_set readset;
     FD_ZERO(&readset);
     FD_SET(sockfd, &readset);
-
     int ready = select(sockfd+1, &readset, NULL, NULL, &timeout);
+
     if (ready < 0) {
       perror("select");
       close(sockfd);
@@ -382,82 +383,61 @@ int pu_receive_message(char *buffer, int bufsize) {
   struct sockaddr_in sender;
   socklen_t sender_len = sizeof(sender);
 
-  /* Preparar pacote de receção */
   char packet[sizeof(PU_Header) + bufsize];
-  size_t len = recvfrom(global.pu_sock, packet, sizeof(packet), 0, (struct sockaddr *)&sender, &sender_len);
-  if (len == 0) {
-    return -1;
-  }
+  ssize_t len = recvfrom(global.pu_sock, packet, sizeof(packet), 0,
+                         (struct sockaddr *)&sender, &sender_len);
+
+  if (len <= 0) return -1;
 
   if (len < (ssize_t)sizeof(PU_Header)) {
-    if (!running) {
-      return -1;
-    }
-    fprintf(stderr, "Recebido pacote incompleto\n");
-    close(global.pu_sock);
+    fprintf(stderr, "Pacote incompleto (%zd bytes)\n", len);
     return -1;
   }
 
   PU_Header header;
   memcpy(&header, packet, sizeof(PU_Header));
-  uint16_t received_checksum = header.checksum;
-  header.checksum = 0;
 
-  // Recalcular checksum
+  uint32_t received_seq = ntohl(header.sequence); // converted de network a host
+  uint16_t received_checksum = header.checksum;
+
+  /* verificar chekcsum */
+  header.checksum = 0;
   memcpy(packet, &header, sizeof(PU_Header));
   uint16_t calculated = pu_checksum_helper(packet, len);
   bool valid_checksum = (received_checksum == htons(calculated));
 
-  #ifdef DEBUG
-  if (!valid_checksum)
-    puts("[DEBUG] Packet com checksum inválido recebido");
-  else
-    puts("[DEBUG] Packet com checksum VÁLIDO recebido");
-  #endif
-
-  /* Verificar sequência (se ativado) */
+  /* Fix 3: Proper sequence handling */
   static uint32_t expected_seq = 0;
-
   bool valid_sequence = true;
+
   if (config.enable_sequence) {
-    uint64_t seq = header.sequence;
-    valid_sequence = (seq == expected_seq);
+    valid_sequence = (received_seq == expected_seq);
   }
 
-  #ifdef DEBUG
-  if (!valid_sequence)
-    puts("[DEBUG] Packet com sequence inválido recebido");
-  else 
-    puts("[DEBUG] Packet com sequence VÁLIDO recebido");
-  #endif
-
-  /* Preparar resposta */
-  PU_Header response = {0};
-  response.sequence = header.sequence;
-  response.timestamp = header.timestamp;
+  // Prepare response
+  PU_Header response = {
+    .sequence = htonl(received_seq), 
+    .timestamp = header.timestamp,
+    .flag = 0
+  };
 
   if (valid_checksum && valid_sequence) {
     PU_SET_ACK(response.flag);
-    sendto(global.pu_sock, &response, sizeof(response), 0,
-           (struct sockaddr *)&sender, sender_len);
-
-    // Copiar payload para o buffer do utilizador
     int payload_len = len - sizeof(PU_Header);
     memcpy(buffer, packet + sizeof(PU_Header), payload_len);
 
-    if (config.enable_sequence)
-      expected_seq++; // avançar sequência esperada
+    if (config.enable_sequence) 
+      expected_seq++; // Only increment on valid reception
 
+    sendto(global.pu_sock, &response, sizeof(response), 0,
+           (struct sockaddr *)&sender, sender_len);
     return payload_len;
   } else {
     PU_SET_NAK(response.flag);
     sendto(global.pu_sock, &response, sizeof(response), 0,
            (struct sockaddr *)&sender, sender_len);
-
     return -1;
   }
-
-  return 0;
 }
 
 void pu_close_protocol() {

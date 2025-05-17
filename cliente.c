@@ -209,29 +209,32 @@ int pu_send_message(const char *destination, const char *message, int len) {
     return -1;
   }
 
+  *seperator = '\0';
+
   int port = atoi(seperator + 1);
   if (port <= 0) {
     fputs("[ERROR] pu_send_message: port must be greater than 0", stderr);
     return -1;
   }
 
-  char ip[INET_ADDRSTRLEN];
-  size_t ip_len = seperator - destination;
-  strncpy(ip, destination, ip_len);
-  ip[ip_len] = '\0';
+  // char ip[INET_ADDRSTRLEN];
+  // size_t ip_len = strlen(host);
+  // strncpy(ip, host, ip_len);
+  // ip[ip_len+1] = '\0';
 
   int sockfd = socket(AF_INET, SOCK_DGRAM, 0);
   struct sockaddr_in dest_addr;
   memset(&dest_addr, 0, sizeof(struct sockaddr_in));
   dest_addr.sin_family = AF_INET;
   dest_addr.sin_port = htons(port);
-  inet_pton(AF_INET, ip, &dest_addr.sin_addr);
+  inet_pton(AF_INET, host, &dest_addr.sin_addr);
   int retries = 0;
 
-  if (inet_pton(AF_INET, ip, &dest_addr.sin_addr) != 1) {
+  if (inet_pton(AF_INET, host, &dest_addr.sin_addr) != 1) {
     fputs("Invalid IP address format.\n", stderr);
     return -1;
   }
+
   assert(config.base_timeout > 0);
 
   struct timeval tv;

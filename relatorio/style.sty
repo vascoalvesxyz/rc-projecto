@@ -1,0 +1,76 @@
+%\usepackage{arsclassica}
+\usepackage[margin=1in, bottom=5cm, top=3cm]{geometry}
+\usepackage{raleway}
+\renewcommand{\familydefault}{\sfdefault}
+\usepackage{ulem}
+\usepackage{wrapfig}
+\usepackage{graphicx,tabularx,booktabs}
+\usepackage{paracol}
+\usepackage[dvipsnames]{xcolor}
+\usepackage{enumitem,amssymb}
+\usepackage[colorlinks=true,urlcolor=blue,linkcolor=MidnightBlue]{hyperref}
+\graphicspath{{./img/}}
+
+\usepackage{enumitem,amssymb}
+\newlist{todolist}{itemize}{2}
+\setlist[todolist]{noitemsep, topsep=0pt,label=$\square$}
+
+\usepackage{pifont}
+\usepackage{amssymb}
+
+\usepackage{minted}
+
+\setlength{\parskip}{1em}%
+\setlength{\parindent}{0em}%
+
+
+\usepackage{titlesec}
+% Format sections
+\titleformat{\section}
+  {\normalfont\Large\bfseries\color{MidnightBlue}}
+  {\thesection}{1em}{}
+
+% Format unnumbered subsections
+\titleformat{name=\subsection,numberless}
+  {\normalfont\large\bfseries\color{MidnightBlue}}
+  {}{0em}{}
+
+% Adjust spacing
+\titlespacing*{\section}{0pt}{3.5ex plus 1ex minus .2ex}{2.3ex plus .2ex}
+\titlespacing*{\subsection}{0pt}{2.5ex plus 1ex minus .2ex}{-2ex plus .2ex}
+
+
+
+\usepackage{listings}
+
+% Define colors
+\definecolor{jsonblue}{rgb}{0.5, 0.5, 0.8}
+\definecolor{jsonred}{rgb}{0.949, 0.522, 0.204}
+\definecolor{jsonpurple}{rgb}{0.58,0,0.82}
+
+% Define JSON language
+\lstdefinelanguage{json}{
+    basicstyle=\ttfamily\footnotesize,
+    stringstyle=\color{jsonblue},
+    commentstyle=\color{jsonred},
+    morecomment=[l][\color{jsonred}]{//},
+    morecomment=[s][\color{jsonred}]{/*}{*/},
+    morestring=[b]",
+    literate=
+     *{0}{{{\color{jsonred}0}}}{1}
+      {1}{{{\color{jsonred}1}}}{1}
+      {2}{{{\color{jsonred}2}}}{1}
+      {3}{{{\color{jsonred}3}}}{1}
+      {4}{{{\color{jsonred}4}}}{1}
+      {5}{{{\color{jsonred}5}}}{1}
+      {6}{{{\color{jsonred}6}}}{1}
+      {7}{{{\color{jsonred}7}}}{1}
+      {8}{{{\color{jsonred}8}}}{1}
+      {9}{{{\color{jsonred}9}}}{1}
+      {:}{{{\color{black}{:}}}}{1}
+      {,}{{{\color{black}{,}}}}{1}
+      {\{}{{{\color{black}{\{}}}}{1}
+      {\}}{{{\color{black}{\}}}}}{1}
+      {[}{{{\color{black}{[}}}}{1}
+      {]}{{{\color{black}{]}}}}{1},
+}

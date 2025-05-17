@@ -1,9 +1,17 @@
-/* O servidor é responsável por transmitir aos clientes uma nova configuração
- * para o PowerUDP via MULTICAST.
- *
- * Os clientes conectam via TCP.
- * */
+/*
+Vasco Alves    2022228207
+Rodrigo Faria  2023234032
+ _ __   _____      _____ _ __ _   _  __| |_ __
+| '_ \ / _ \ \ /\ / / _ \ '__| | | |/ _` | '_ \
+| |_) | (_) \ V  V /  __/ |  | |_| | (_| | |_) |
+| .__/ \___/ \_/\_/ \___|_|   \__,_|\__,_| .__/
+|_|                                      |_|
 
+O PowerUDP permitirá suportar as seguintes funcionalidades:
+1. Registo da aplicação cliente no servidor, com recurso a chave pré-configurada;
+2. Envio para o servidor de pedidos de alteração à configuração do protocolo ativa na rede;
+3. Envio e receção de mensagens UDP para outros hosts, com garantias de confiabilidade de acordo com a configuração ativa; 
+*/
 #include <arpa/inet.h>
 #include <assert.h>
 #include <fcntl.h>
@@ -36,81 +44,12 @@ static int multicast_sock;
 static int tcp_sock;
 static volatile sig_atomic_t running = 1;
 
-static void handle_signal(int sig) {
-  (void)sig;
-  running = 0;
-}
-static bool setup_multicast(const char *group, int port);
+static void handle_signal(); 
 static bool setup_tcp(const char *bind_addr, int port, int backlog);
+static bool setup_multicast(const char *group, int port);
 void *handle_client(void *arg);
 
-int main(int argc, char *argv[]) {
-  if (argc != 3) {
-    fputs("servidor: <tcp_bind_ip> <tcp_port>\n", stderr);
-    exit(EXIT_FAILURE);
-  }
-
-  char *tcp_bind_ip = argv[1];
-  int tcp_port = atoi(argv[2]);
-
-  if (!setup_tcp(tcp_bind_ip, tcp_port, 10) ||
-      !setup_multicast(MULTICAST_GROUP, MULTICAST_PORT)) {
-    exit(EXIT_FAILURE);
-  }
-
-  struct sigaction sa = {.sa_handler = handle_signal, .sa_flags = SA_RESTART};
-
-  sigemptyset(&sa.sa_mask);
-  sigaction(SIGINT, &sa, NULL);
-  sigaction(SIGTERM, &sa, NULL);
-
-  fd_set read_fds;
-  struct timeval tv;
-
-  while (running) {
-    FD_ZERO(&read_fds);
-    FD_SET(tcp_sock, &read_fds);
-
-    tv.tv_sec = 1;
-    tv.tv_usec = 0;
-
-    if (select(tcp_sock + 1, &read_fds, NULL, NULL, &tv) < 0) {
-      perror("select error");
-      continue;
-    }
-
-    if (FD_ISSET(tcp_sock, &read_fds)) {
-      ThreadArgs *args = malloc(sizeof(ThreadArgs));
-      if (!args) {
-        perror("malloc failed");
-        continue;
-      }
-
-      socklen_t client_len = sizeof(args->client_addr);
-      args->client_fd =
-          accept(tcp_sock, (struct sockaddr *)&args->client_addr, &client_len);
-      puts("accepted client");
-
-      if (args->client_fd < 0) {
-        free(args);
-        continue;
-      }
-
-      pthread_t tid;
-      if (pthread_create(&tid, NULL, handle_client, args) != 0) {
-        perror("thread creation failed");
-        close(args->client_fd);
-        free(args);
-      } else {
-        pthread_detach(tid);
-      }
-    }
-  }
-
-  close(tcp_sock);
-  close(multicast_sock);
-  return 0;
-}
+static void handle_signal() { running = 0; }
 
 static bool setup_tcp(const char *bind_addr, int port, int backlog) {
   /* verifica que o port é valido */
@@ -188,28 +127,103 @@ static bool setup_multicast(const char *group, int port) {
 }
 
 void *handle_client(void *arg) {
-  ThreadArgs *args = (ThreadArgs *)arg;
+  /* Dar dereference e free imediatamente */
+  ThreadArgs args = *(ThreadArgs *)arg;
+  free(arg);
+
+  static char ip_str[INET_ADDRSTRLEN];
+  inet_ntop(AF_INET, &args.client_addr.sin_addr, ip_str, sizeof(ip_str));
+  int port = ntohs(args.client_addr.sin_port);
+
+  printf("%10s:%-5d quer conectar...\n", ip_str, port);
 
   PU_RegisterMessage msg;
-  ssize_t len = read(args->client_fd, &msg, sizeof(msg));
+  ssize_t len = read(args.client_fd, &msg, sizeof(msg));
   if (len != sizeof(msg)) {
-    perror("erro a ler mensagem");
+    printf("%10s:%-5d enviou mensagem imcompleta!\n", ip_str, port);
     goto thread_exit;
   }
 
   if (strncmp(msg.psk, PSK, 64) != 0) {
-    write(args->client_fd, "NACK\0", 5);
+    printf("%10s:%-5d tinha chave incorrecta!\n", ip_str, port);
+    write(args.client_fd, "NACK\0", 5);
     goto thread_exit;
   }
 
   pthread_mutex_lock(&mutex);
-  write(args->client_fd, &config, sizeof(PU_ConfigMessage));
+  write(args.client_fd, &config, sizeof(PU_ConfigMessage));
   pthread_mutex_unlock(&mutex);
 
-  printf("Autenticado!\n");
+  printf("%10s:%-5d foi aceite!\n", ip_str, port);
 
-thread_exit:
-  close(args->client_fd);
-  free(args);
+  thread_exit:
+  close(args.client_fd);
   return NULL;
 }
+
+int main(int argc, char *argv[]) {
+  if (argc != 3) {
+    fputs("servidor: <tcp_bind_ip> <tcp_port>\n", stderr);
+    exit(EXIT_FAILURE);
+  }
+
+  char *tcp_bind_ip = argv[1];
+  int tcp_port = atoi(argv[2]);
+
+  if (!setup_tcp(tcp_bind_ip, tcp_port, 10) ||
+      !setup_multicast(MULTICAST_GROUP, MULTICAST_PORT)) {
+    exit(EXIT_FAILURE);
+  }
+
+  struct sigaction sa = {.sa_handler = handle_signal, .sa_flags = SA_RESTART};
+
+  sigemptyset(&sa.sa_mask);
+  sigaction(SIGINT, &sa, NULL);
+  sigaction(SIGTERM, &sa, NULL);
+
+  fd_set read_fds;
+  struct timeval tv;
+
+  while (running) {
+    FD_ZERO(&read_fds);
+    FD_SET(tcp_sock, &read_fds);
+
+    tv.tv_sec = 1;
+    tv.tv_usec = 0;
+
+    if (select(tcp_sock + 1, &read_fds, NULL, NULL, &tv) < 0) {
+      if (!running) break;
+      perror("select error");
+      continue;
+    }
+
+    if (FD_ISSET(tcp_sock, &read_fds)) {
+      ThreadArgs *args = malloc(sizeof(ThreadArgs));
+      if (!args) {
+        perror("malloc failed");
+        continue;
+      }
+
+      socklen_t client_len = sizeof(args->client_addr);
+      args->client_fd = accept(tcp_sock, (struct sockaddr *)&args->client_addr, &client_len);
+      if (args->client_fd < 0) {
+        continue;
+      }
+
+      pthread_t tid;
+      if (pthread_create(&tid, NULL, handle_client, args) != 0) {
+        perror("thread creation failed");
+        close(args->client_fd);
+      } else {
+        pthread_detach(tid);
+      }
+    }
+  }
+
+  puts("Exited cleanly.");
+
+  close(tcp_sock);
+  close(multicast_sock);
+  return 0;
+}
+

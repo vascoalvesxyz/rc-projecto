@@ -42,6 +42,8 @@ O PowerUDP permitirá suportar as seguintes funcionalidades:
 
 #define PSK "337b8d2c1e132acd75171f1acf0e73b20bc9541720d5003813f59ef0ad51f86f"
 
+#define DEBUG
+
 typedef struct {
   int sv_sock;
   int mc_sock;
@@ -59,6 +61,7 @@ static void *thread_receive_loop(void *arg);
 static bool setup_multicast(char* group, int port);
 static bool setup_pu_listener(int port);
 static void handle_sigint();
+static char* parse_destination(const char* src, int *port_ptr);
 
 /* PowerUDP */
 int pu_init_protocol(const char *server_ip, int server_port, const char *psk);
@@ -193,11 +196,29 @@ static bool setup_pu_listener(int port) {
 
 static void handle_sigint() {
   running = 0;
-  puts("SIGINT RECIEVED");
-  shutdown(global.mc_sock, SHUT_RDWR);
-  shutdown(global.pu_sock, SHUT_RDWR);
-  close(global.mc_sock);
-  close(global.pu_sock);
+}
+
+static char* parse_destination(const char* src, int *port_ptr) {
+
+  /* Dar parse ao destino */
+  char *host = (char*) src;
+  char *seperator = strchr(host, ':');
+  if (seperator == NULL) {
+    fputs("Destino não contem ':'\n", stderr);
+    return NULL;
+  }
+  *seperator = '\0';
+
+  /* Dar parse ao port */
+  int port = atoi(seperator + 1);
+  if (port <= 0 || port >= 65535) {
+    fputs("Port inválido.\n", stderr);
+    return NULL;
+  }
+
+  /* return */
+  *port_ptr = port;
+  return host;
 }
 
 /* Init protocol */
@@ -259,38 +280,22 @@ int pu_init_protocol(const char *server_ip, int server_port, const char *psk) {
 
   memcpy(&config, resposta_serializada, sizeof(PU_ConfigMessage));
   puts("Successfuly retrieved config!");
+  close(global.sv_sock);
   return 0;
 }
 
 int pu_send_message(const char *destination, const char *message, int len) {
 
-  const char *host = destination;
-  char *seperator = strchr(host, ':');
-  if (seperator == NULL) {
-    fputs("Destino não contem ':'\n", stderr);
-    return -1;
-  }
-
-  *seperator = '\0';
-
-  int port = atoi(seperator + 1);
-  if (port <= 0 || port >= 65535) {
-    fputs("Port inválido.\n", stderr);
-    return -1;
-  }
-
-  // char ip[INET_ADDRSTRLEN];
-  // size_t ip_len = strlen(host);
-  // strncpy(ip, host, ip_len);
-  // ip[ip_len+1] = '\0';
+  int port = 0;
+  char *host = parse_destination(destination, &port);
 
   int sockfd = socket(AF_INET, SOCK_DGRAM, 0);
+
   struct sockaddr_in dest_addr;
   memset(&dest_addr, 0, sizeof(struct sockaddr_in));
   dest_addr.sin_family = AF_INET;
   dest_addr.sin_port = htons(port);
   inet_pton(AF_INET, host, &dest_addr.sin_addr);
-  int retries = 0;
 
   if (inet_pton(AF_INET, host, &dest_addr.sin_addr) != 1) {
     fputs("Invalid IP address format.\n", stderr);
@@ -298,72 +303,78 @@ int pu_send_message(const char *destination, const char *message, int len) {
   }
 
   assert(config.base_timeout > 0);
-
-  struct timeval tv;
-  tv.tv_sec = config.base_timeout / 1000;
-  tv.tv_usec = (config.base_timeout % 1000) * 1000;
+  assert(config.max_retries > 0);
 
   /* Construir pacote */
   PU_Header header;
-  char packet[sizeof(header) + len];
+  char      packet[sizeof(header) + len];
+  int       retries = 0;
 
-  assert(config.max_retries > 0);
+  struct timeval timeout = {0};
+  struct timeval now;
 
   while (retries < config.max_retries) {
-    // Preencher header
-    struct timeval now;
+    
+    /* Timeout para o select (NÃO CONFUNDIR COM O TIMESTAMP) */
+    timeout = (struct timeval) {
+      .tv_sec  = config.base_timeout / 1000,
+      .tv_usec = (config.base_timeout % 1000) * 1000
+    };
+
+    /* timestamp */
     gettimeofday(&now, NULL);
+    header.timestamp = now.tv_sec*1000000 + now.tv_usec;
+    header.sequence  = htonl(current_seq);
+    header.flag      = 0;
 
-    header.timestamp = now.tv_sec * 1000000 + now.tv_usec;
-    header.sequence = current_seq;
-    header.flag = 0;
-
-    /* Calcular checksum */
+    /* copiar header e calcular checksum */
     memcpy(packet, &header, sizeof(header));
     memcpy(packet + sizeof(header), message, len);
     header.checksum = htons(pu_checksum_helper(packet, sizeof(header) + len));
     memcpy(packet, &header, sizeof(header));
 
-    // Enviar
-    ssize_t sent = sendto(sockfd, packet, sizeof(packet), 0,
-                          (struct sockaddr *)&dest_addr, sizeof(dest_addr));
-    if ((size_t)sent != sizeof(packet)) {
-      perror("sendto() failed");
+    /* envio do packet */
+    if (sendto(sockfd, packet, sizeof(header)+len, 0, (struct sockaddr*)&dest_addr,
+               sizeof(dest_addr)) != (ssize_t)(sizeof(header)+len)) {
+      perror("sendto");
+      close(sockfd);
       return -1;
     }
 
-    // Esperar ACK
+    /* Esperar resposta */
     fd_set readset;
     FD_ZERO(&readset);
     FD_SET(sockfd, &readset);
 
-    int ready = select(sockfd + 1, &readset, NULL, NULL, &tv);
-    if (ready > 0) {
-
-      PU_Header ack_header;
-      struct sockaddr_in src_addr;
-      socklen_t addr_len = sizeof(src_addr);
-
-      ssize_t recvd = recvfrom(sockfd, &ack_header, sizeof(ack_header), 0, (struct sockaddr *)&src_addr, &addr_len);
-      if (!running)
-
-      if (recvd == sizeof(ack_header) && (PU_IS_ACK(ack_header.flag)) &&
-        (uint64_t)ntohl(ack_header.sequence) == current_seq) {
-        current_seq++;
-        close(sockfd);
-        return 0; // Sucesso
-      }
+    int ready = select(sockfd+1, &readset, NULL, NULL, &timeout);
+    if (ready < 0) {
+      perror("select");
+      close(sockfd);
+      return -1;
     } else if (ready == 0) {
       retries++;
-      fprintf(stderr, "Timeout, retrying (%d/%d)\n", retries,
-              config.max_retries);
-    } else {
-      perror("select() failed");
-      return -1;
+      fprintf(stderr, "Timeout, retrying (%d/%d)\n", retries, config.max_retries);
+      continue;
     }
+
+    /* berificar que recebemos um ACK */
+    PU_Header ack;
+    socklen_t addrlen = sizeof(dest_addr);
+    ssize_t recv_len = recvfrom(sockfd, &ack, sizeof(ack), 0, (struct sockaddr*)&dest_addr, &addrlen);
+
+    if (recv_len == (ssize_t)sizeof(ack) && PU_IS_ACK(ack.flag) && ntohl(ack.sequence) == current_seq) {
+      current_seq++;
+      close(sockfd);
+      return 0; 
+    }
+
+    /* ack invalido */
+    retries++;
+    fprintf(stderr, "Received non‑ACK or wrong seq, retrying (%d/%d)\n", retries, config.max_retries);
   }
 
   fprintf(stderr, "Max retries reached\n");
+  close(sockfd);
   return -1;
 }
 
@@ -397,15 +408,30 @@ int pu_receive_message(char *buffer, int bufsize) {
   uint16_t calculated = pu_checksum_helper(packet, len);
   bool valid_checksum = (received_checksum == htons(calculated));
 
-  // Verificar sequência (se ativado)
-  static uint64_t expected_seq = 0;
+  #ifdef DEBUG
+  if (!valid_checksum)
+    puts("[DEBUG] Packet com checksum inválido recebido");
+  else
+    puts("[DEBUG] Packet com checksum VÁLIDO recebido");
+  #endif
+
+  /* Verificar sequência (se ativado) */
+  static uint32_t expected_seq = 0;
+
   bool valid_sequence = true;
   if (config.enable_sequence) {
     uint64_t seq = header.sequence;
     valid_sequence = (seq == expected_seq);
   }
 
-  // Preparar resposta
+  #ifdef DEBUG
+  if (!valid_sequence)
+    puts("[DEBUG] Packet com sequence inválido recebido");
+  else 
+    puts("[DEBUG] Packet com sequence VÁLIDO recebido");
+  #endif
+
+  /* Preparar resposta */
   PU_Header response = {0};
   response.sequence = header.sequence;
   response.timestamp = header.timestamp;
@@ -430,6 +456,16 @@ int pu_receive_message(char *buffer, int bufsize) {
 
     return -1;
   }
+
+  return 0;
+}
+
+void pu_close_protocol() {
+  puts("Closing protocol...");
+  shutdown(global.mc_sock, SHUT_RDWR);
+  shutdown(global.pu_sock, SHUT_RDWR);
+  close(global.mc_sock);
+  close(global.pu_sock);
 }
 
 int main(int argc, char *argv[]) {
@@ -439,20 +475,16 @@ int main(int argc, char *argv[]) {
     exit(EXIT_FAILURE);
   }
 
-  /* Verificar argumentos */
-  char parse[64];
-  strncpy(parse, argv[1], 63);
 
-  char *sv_host = parse;
-  char *seperador = strchr(sv_host, ':');
-  if (seperador == NULL) {
+  int sv_port = 0;
+  char *sv_host = parse_destination(argv[1], &sv_port);
+  if (sv_host == NULL) {
     puts("cliente [server hostname:port] [client port]");
     exit(EXIT_FAILURE);
   }
-  *seperador = '\0';
 
-  int sv_port = atoi(seperador+1);
   int my_port = atoi(argv[2]);
+
 
   /* Registar no servidor */
   if (  pu_init_protocol(sv_host, sv_port, PSK) < 0 
@@ -476,6 +508,7 @@ int main(int argc, char *argv[]) {
 
   char line[256];
   while (running) {
+
     printf("> ");
     if (!fgets(line, sizeof(line), stdin))
       break;
@@ -492,9 +525,10 @@ int main(int argc, char *argv[]) {
     } else {
       printf("Comando inválido. Usa: msg <ip:port> <mensagem> ou sair\n");
     }
-    if (!running)
-      break;
+
   }
+
+  pu_close_protocol();
 
   puts("Waiting for multicast listener to join...");
   pthread_join(multicast_listener, NULL);

@@ -18,6 +18,7 @@ O PowerUDP permitirá suportar as seguintes funcionalidades:
 #include <netinet/in.h>
 #include <stdint.h>
 #include <stdio.h>
+#include <sys/time.h>
 
 /* Definição dos flags (usando bits distintos) */
 #define PU_DATA 0b10000000  // Bit 7 (1 << 7)
@@ -72,6 +73,12 @@ static inline uint16_t pu_checksum_helper(const void *data, size_t len) {
     sum += bytes[i];
   }
   return (uint16_t)(sum & 0xFFFF);
+}
+
+static inline time_t pu_timestamp_helper() {
+  struct timeval now;
+  gettimeofday(&now, NULL);
+  return now.tv_sec * 1000000 + now.tv_usec;
 }
 
 #endif // !_POWERUDP_

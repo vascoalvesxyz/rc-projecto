@@ -14,36 +14,39 @@ pré-configurada;
 ativa na rede;
 3. Envio e receção de mensagens UDP para outros hosts, com garantias de
 confiabilidade de acordo com a configuração ativa; */
-
 /* Definição dos flags (usando bits distintos) */
-#define PU_DATA     0b10000000  // Bit 7 (1 << 7)
-#define PU_ACK      0b01000000  // Bit 6 (1 << 6)
+#define PU_NAK 0b00100000
+#define PU_IS_NAK(f) ((f) & PU_NAK)
+#define PU_SET_NAK(f) ((f) |= PU_NAK)
+
+#define PU_DATA 0b10000000 // Bit 7 (1 << 7)
+#define PU_ACK 0b01000000  // Bit 6 (1 << 6)
 
 /* Macros para verificar os flags */
-#define PU_IS_DATA(f)  ((f) & PU_DATA)
-#define PU_IS_ACK(f)   ((f) & PU_ACK)
+#define PU_IS_DATA(f) ((f) & PU_DATA)
+#define PU_IS_ACK(f) ((f) & PU_ACK)
 
 /* Macros para definir os flags */
 #define PU_SET_DATA(f) ((f) |= PU_DATA)
-#define PU_SET_ACK(f)  ((f) |= PU_ACK)
+#define PU_SET_ACK(f) ((f) |= PU_ACK)
 
 typedef struct {
-  uint64_t timestamp;    // Timestamp em microssegundos
-  uint32_t sequence;     // Número de sequência para controle
-  uint16_t checksum;     // Checksum customizado
+  uint64_t timestamp; // Timestamp em microssegundos
+  uint32_t sequence;  // Número de sequência para controle
+  uint16_t checksum;  // Checksum customizado
   uint8_t flag;
 } PU_Header;
 
 typedef struct {
-    uint16_t base_timeout;          // 2 bytes, Tempo base para timeouts (ms)
-    uint8_t enable_retransmission;  // 1 byte, 0 = Desativado, 1 = Ativado
-    uint8_t enable_backoff;         // 1 byte, 0 = Desativado, 1 = Ativado
-    uint8_t enable_sequence;        // 1 byte, 0 = Desativado, 1 = Ativado
-    uint8_t max_retries;            // 1 byte, Número máximo de retransmissões
+  uint16_t base_timeout;         // 2 bytes, Tempo base para timeouts (ms)
+  uint8_t enable_retransmission; // 1 byte, 0 = Desativado, 1 = Ativado
+  uint8_t enable_backoff;        // 1 byte, 0 = Desativado, 1 = Ativado
+  uint8_t enable_sequence;       // 1 byte, 0 = Desativado, 1 = Ativado
+  uint8_t max_retries;           // 1 byte, Número máximo de retransmissões
 } PU_ConfigMessage;
 
 typedef struct {
-    char psk[64];   // Chave pré-definida para autenticação
+  char psk[64]; // Chave pré-definida para autenticação
 } PU_RegisterMessage;
 
 // Inicializa a stack de comunicação e regista-se no servidor
@@ -68,12 +71,12 @@ int pu_get_last_message_stats(int *retransmissions, int *delivery_time);
 void pu_inject_packet_loss(int probability);
 
 static inline uint16_t pu_checksum_helper(const void *data, size_t len) {
-    const uint8_t *bytes = (uint8_t*) data;
-    uint32_t sum = 0;
-    for (size_t i = 0; i < len; i++) {
-        sum += bytes[i];
-    }
-    return (uint16_t)(sum & 0xFFFF);
+  const uint8_t *bytes = (uint8_t *)data;
+  uint32_t sum = 0;
+  for (size_t i = 0; i < len; i++) {
+    sum += bytes[i];
+  }
+  return (uint16_t)(sum & 0xFFFF);
 }
 
 #endif // !_POWERUDP_

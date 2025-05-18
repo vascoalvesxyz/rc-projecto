@@ -29,7 +29,6 @@ O PowerUDP permitirá suportar as seguintes funcionalidades:
 #include <sys/socket.h>
 #include <sys/time.h>
 #include <sys/types.h>
-#include <time.h>
 #include <unistd.h>
 
 #define SV_IP "193.137.101.1"
@@ -57,10 +56,14 @@ static uint64_t current_seq = 0;
 static volatile sig_atomic_t running = 1;
 int packet_loss_percent = 0;
 
+const char *server_ip;
+int server_port;
+const char *psk;
+
 /* Helpers */
 static void *thread_multicast_listener(void *arg);
 static void *thread_receive_loop(void *arg);
-static bool setup_multicast(char* group, int port);
+static bool setup_multicast(const char* group, int port);
 static bool setup_pu_listener(int port);
 static void handle_sigint();
 static char* parse_destination(const char* src, int *port_ptr);
@@ -134,50 +137,67 @@ static void *thread_multicast_listener(void *arg) {
   pthread_exit(NULL);
 }
 
-static bool setup_multicast(char* group, int port) {
-  /* multicast sock */
-  global.mc_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
-  if (global.mc_sock < 0) {
-    perror("[Multicast Listener] Multicast socket creation failed");
-    return false;
-  }
+static bool setup_multicast(const char *group, int port) {
+    // create UDP socket
+    int sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
+    if (sock < 0) {
+        perror("[Multicast Listener] socket()");
+        return false;
+    }
 
-  /* reuse */
-  int reuse = 1;
-  if (setsockopt(global.mc_sock, SOL_SOCKET, SO_REUSEADDR, &reuse,
-                 sizeof(reuse)) < 0) {
-    perror("[Multicast Listener] setsockopt(SO_REUSEADDR) failed");
-    close(global.mc_sock);
-    return false;
-  }
+    // allow multiple listeners on same port
+    int reuse = 1;
+    if (setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) < 0 ||
+        setsockopt(sock, SOL_SOCKET, SO_REUSEPORT, &reuse, sizeof(reuse)) < 0) {
+        perror("[Multicast Listener] SO_REUSEADDR/SO_REUSEPORT");
+        close(sock);
+        return false;
+    }
 
-  /* usar grupo predefinido */
-  struct sockaddr_in addr = {
-    .sin_family = AF_INET,
-    .sin_port = htons(port),
-    .sin_addr.s_addr = INADDR_ANY
-  };
+    // bind to all interfaces on given port
+    struct sockaddr_in addr;
+    memset(&addr, 0, sizeof(addr));
+    addr.sin_family      = AF_INET;
+    addr.sin_port        = htons(port);
+    addr.sin_addr.s_addr = htonl(INADDR_ANY);
 
-  /* bind */
-  if (bind(global.mc_sock, (struct sockaddr *)&addr, sizeof(addr)) < 0) {
-    perror("[Multicast Listener] Multicast bind failed");
-    close(global.mc_sock);
-    return false;
-  }
+    if (bind(sock, (struct sockaddr*)&addr, sizeof(addr)) < 0) {
+        perror("[Multicast Listener] bind()");
+        close(sock);
+        return false;
+    }
 
-  /* mreq */
-  struct ip_mreq mreq;
-  mreq.imr_multiaddr.s_addr = inet_addr(group);
-  mreq.imr_interface.s_addr = INADDR_ANY;
-  if (setsockopt(global.mc_sock, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq,
-                 sizeof(struct ip_mreq)) < 0) {
-    perror("[Multicast Listener] Join multicast group failed");
-    close(global.mc_sock);
-    return false;
-  }
+    // prepare to join group
+    struct ip_mreq mreq;
+    memset(&mreq, 0, sizeof(mreq));
 
-  puts("[Multicast Listener] Joined multicast group!");
-  return true;
+    // parse and validate group address
+    if (inet_pton(AF_INET, group, &mreq.imr_multiaddr) != 1) {
+        fprintf(stderr, "[Multicast Listener] invalid group: %s\n", group);
+        close(sock);
+        return false;
+    }
+    uint32_t grp = ntohl(mreq.imr_multiaddr.s_addr);
+    if ((grp & 0xF0000000) != 0xE0000000) {
+        fprintf(stderr, "[Multicast Listener] %s is not a multicast address\n", group);
+        close(sock);
+        return false;
+    }
+
+    // let the kernel choose the interface (INADDR_ANY)
+    mreq.imr_interface.s_addr = htonl(INADDR_ANY);
+
+    // 5) join!
+    if (setsockopt(sock, IPPROTO_IP, IP_ADD_MEMBERSHIP, &mreq, sizeof(mreq)) < 0) {
+        perror("[Multicast Listener] IP_ADD_MEMBERSHIP failed: %s\n");
+        close(sock);
+        return false;
+    }
+
+    printf("[Multicast Listener] Listening on %s:%d\n", group, port);
+    
+    global.mc_sock = sock;
+    return true;
 }
 
 static bool setup_pu_listener(int port) {
@@ -228,8 +248,7 @@ static char* parse_destination(const char* src, int *port_ptr) {
   return host;
 }
 
-/* Init protocol */
-int pu_init_protocol(const char *server_ip, int server_port, const char *psk) {
+int pu_request_protocol_config(PU_ConfigMessage new_config) {
 
   /* TCP socket para comunicr com o server */
   global.sv_sock = socket(AF_INET, SOCK_STREAM, 0);
@@ -256,8 +275,87 @@ int pu_init_protocol(const char *server_ip, int server_port, const char *psk) {
     return -1;
   }
 
+  /* Serializar mensagem e comando */
+  char msg[sizeof(PU_RegisterMessage) + 7];
+  memcpy(msg, psk, sizeof(PU_RegisterMessage));
+  char comando[] = "newcfg\0";
+  memcpy(msg+sizeof(PU_RegisterMessage), comando, 7);
+
   /* enviar key via psk */
-  if (write(global.sv_sock, psk, strlen(psk)) < 0) {
+  if (write(global.sv_sock, msg, strlen(msg)) < 0) {
+    fputs("PSK send failed", stderr);
+    close(global.sv_sock);
+    return -1;
+  }
+
+  /* obter resposta do servidor */
+  char resposta_serializada[32];
+  int recvlen = read(global.sv_sock, &resposta_serializada, 32);
+  if (recvlen < 0) {
+    fputs("Failed to recieve config message from server.", stderr);
+    close(global.sv_sock);
+    return -1;
+  }
+  resposta_serializada[recvlen] = '\0';
+
+  /* Verificar resposta */
+  if (strncmp(resposta_serializada, "ACK", 3) == 0) {
+    puts("PSK was correct!");
+    write(global.sv_sock, &new_config, sizeof(new_config));
+    close(global.sv_sock);
+    return 0;
+  } else {
+    puts("New config rejected!");
+    close(global.sv_sock);
+    return -1;
+  }
+
+  puts("Successfuly retrieved config!");
+  close(global.sv_sock);
+  return 0;
+
+}
+
+/* Init protocol */
+int pu_init_protocol(const char *sv_ip, int sv_port, const char *key) {
+
+  server_ip = sv_ip;
+  server_port = sv_port;
+  psk = key;
+
+  /* TCP socket para comunicr com o server */
+  global.sv_sock = socket(AF_INET, SOCK_STREAM, 0);
+  if (global.sv_sock < 0) {
+    fputs("TCP socket creation failed", stderr);
+    return -1;
+  }
+
+  /* address do servidor */
+  struct sockaddr_in sv_addr = {.sin_family = AF_INET,
+    .sin_port = htons(server_port)};
+
+  if (inet_pton(AF_INET, server_ip, &sv_addr.sin_addr) <= 0) {
+    fputs("Invalid server address", stderr);
+    close(global.sv_sock);
+    return -1;
+  }
+
+  /* ligar ao servidor */
+  if (connect(global.sv_sock, (struct sockaddr *)&sv_addr, sizeof(sv_addr)) <
+    0) {
+    fputs("TCP connection failed", stderr);
+    close(global.sv_sock);
+    return -1;
+  }
+
+  /* Serializar mensagem e comando */
+  char msg[64 + 6];
+  memcpy(msg, psk, 64);
+  memcpy(msg+64, "login\0", 6);
+  printf("%s\n", msg);
+
+  /* enviar key via psk */
+  if (write(global.sv_sock, msg, strlen(msg)) < 0) {
     fputs("PSK send failed", stderr);
     close(global.sv_sock);
     return -1;
@@ -275,7 +373,7 @@ int pu_init_protocol(const char *server_ip, int server_port, const char *psk) {
   }
 
   /* Verificar resposta */
-  if (strcmp(resposta_serializada, "NACK\0") == 0) {
+  if (strncmp(resposta_serializada, "NAK", 3) == 0) {
     fputs("PSK was incorrect!", stderr);
     close(global.sv_sock);
     return -1;
@@ -455,24 +553,21 @@ void pu_inject_packet_loss(int probability) {
 
 int main(int argc, char *argv[]) {
 
-  if (argc != 3) {
-    puts("cliente [server hostname:port] [client port]");
+  if (argc != 4) {
+    puts("cliente [server_ip] [tcp_port] [powerudp_port]");
     exit(EXIT_FAILURE);
   }
 
+  char *sv_host = argv[1];
+  int sv_port = atoi(argv[2]);
+  int my_port = atoi(argv[3]);
 
-  int sv_port = 0;
-  char *sv_host = parse_destination(argv[1], &sv_port);
-  if (sv_host == NULL) {
-    puts("cliente [server hostname:port] [client port]");
+  if (sv_port < 0 || my_port < 0) {
+    puts("cliente [server_ip] [tcp_port] [powerudp_port]");
     exit(EXIT_FAILURE);
   }
 
-  int my_port = atoi(argv[2]);
-
-
-  /* Registar no servidor */
-  if (  pu_init_protocol(sv_host, sv_port, PSK) < 0 
+  /* Registar no servidor */ if (pu_init_protocol(sv_host, sv_port, PSK) < 0 
     || !setup_multicast(MULTICAST_GROUP, MULTICAST_PORT)
     || !setup_pu_listener(my_port) 
   ) {
@@ -506,6 +601,15 @@ int main(int argc, char *argv[]) {
         pu_send_message(ipport, msg, strlen(msg));
       } else {
         printf("Uso: msg <ip:port> <mensagem>\n");
+      }
+    } else if (strncmp(line, "newcfg ", 7) == 0) {
+      char retries[64];
+      if (sscanf(line + 7, "%[^\n]", retries) == 1) {
+        PU_ConfigMessage new_config = config;
+        new_config.max_retries = atoi(retries);
+        pu_request_protocol_config(new_config); 
+      } else {
+        printf("Uso: newcfg <retries>\n");
       }
     } else if (strncmp(line, "sair", 4) == 0) {
       break;

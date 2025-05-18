@@ -45,13 +45,13 @@ static int tcp_sock;
 static volatile sig_atomic_t running = 1;
 
 static void handle_signal(); 
-static bool setup_tcp(const char *bind_addr, int port, int backlog);
-static bool setup_multicast(const char *group, int port);
+static bool setup_tcp(int port, int backlog);
+static bool setup_multicast();
 void *handle_client(void *arg);
 
 static void handle_signal() { running = 0; }
 
-static bool setup_tcp(const char *bind_addr, int port, int backlog) {
+static bool setup_tcp(int port, int backlog) {
   /* verifica que o port é valido */
   if (port < 0 || port > 65535)
     return false;
@@ -66,21 +66,16 @@ static bool setup_tcp(const char *bind_addr, int port, int backlog) {
   /* dar bind ao host e port */
   struct sockaddr_in server_addr = {
     .sin_family = AF_INET,
-    .sin_port = htons(port)
+    .sin_port = htons(port),
+    .sin_addr.s_addr = htonl(INADDR_ANY)
   };
 
-  if (inet_pton(AF_INET, bind_addr, &server_addr.sin_addr) != 1) {
-    fprintf(stderr, "Invalid bind address: %s\n", bind_addr);
-    close(tcp_sock);
-    return false;
-  }
-
-  if (bind(tcp_sock, (struct sockaddr *)&server_addr, sizeof(server_addr)) <
-      0) {
+  if (bind(tcp_sock, (struct sockaddr*)&server_addr, sizeof(server_addr)) < 0) {
     perror("bind() failed");
     close(tcp_sock);
     return false;
   }
+
   /* ouvir */
   if (listen(tcp_sock, backlog) < 0) {
     perror("listen() failed");
@@ -88,23 +83,29 @@ static bool setup_tcp(const char *bind_addr, int port, int backlog) {
     return false;
   }
 
-  printf("tcp setup on %s:%d\n", bind_addr, port);
+  printf("tcp setup on port %d\n", port);
   return true;
 }
 
-static bool setup_multicast(const char *group, int port) {
+static bool setup_multicast() {
   /* criar socket */
   multicast_sock = socket(AF_INET, SOCK_DGRAM, IPPROTO_UDP);
   if (multicast_sock < 0) {
-    perror("setup_multicast: socket() failed");
+    perror("setup_multicast: ");
+    return false;
+  }
+
+  int reuse = 1;
+  if (setsockopt(multicast_sock, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse)) < 0) {
+    perror("setup_multicast: ");
+    close(multicast_sock);
     return false;
   }
 
   /* mudar time-to-live */
-  int ttl = 32;
-  if (setsockopt(multicast_sock, IPPROTO_IP, IP_MULTICAST_TTL, &ttl,
-                 sizeof(ttl))) {
-    perror("setup_multicast: setsockopt(TTL) failed");
+  int ttl = 128;
+  if (setsockopt(multicast_sock, IPPROTO_IP, IP_MULTICAST_TTL, &ttl, sizeof(ttl))) {
+    perror("setup_multicast: ");
     close(multicast_sock);
     return false;
   }
@@ -113,16 +114,15 @@ static bool setup_multicast(const char *group, int port) {
   struct sockaddr_in multicast_addr;
   memset(&multicast_addr, 0, sizeof(multicast_addr));
   multicast_addr.sin_family = AF_INET;
-  multicast_addr.sin_port = htons(port);
+  multicast_addr.sin_port = htons(MULTICAST_PORT);
 
-  /* validar endereço */
-  if (inet_pton(AF_INET, group, &multicast_addr.sin_addr) != 1) {
-    fprintf(stderr, "setup_multicast: invalid multicast address: %s\n", group);
+  if (bind(multicast_sock, (struct sockaddr*)&multicast_addr, sizeof(multicast_addr)) < 0) {
+    perror("setup_multicast: bind() failed");
     close(multicast_sock);
     return false;
   }
 
-  printf("multicast setup on %s:%d\n", group, port);
+  printf("multicast setup on %s:%d\n", MULTICAST_GROUP, MULTICAST_PORT);
   return true;
 }
 
@@ -137,24 +137,49 @@ void *handle_client(void *arg) {
 
   printf("%10s:%-5d quer conectar...\n", ip_str, port);
 
-  PU_RegisterMessage msg;
-  ssize_t len = read(args.client_fd, &msg, sizeof(msg));
-  if (len != sizeof(msg)) {
+  char recv[sizeof(PU_RegisterMessage) + 33];
+  recv[sizeof(PU_RegisterMessage) + 32] = '\0';
+
+  ssize_t len = read(args.client_fd, &recv, sizeof(PU_RegisterMessage) + 33);
+  if (len < sizeof(PU_RegisterMessage)) {
     printf("%10s:%-5d enviou mensagem imcompleta!\n", ip_str, port);
     goto thread_exit;
   }
 
-  if (strncmp(msg.psk, PSK, 64) != 0) {
+  if (strncmp(recv, PSK, 64) != 0) {
     printf("%10s:%-5d tinha chave incorrecta!\n", ip_str, port);
-    write(args.client_fd, "NACK\0", 5);
+    write(args.client_fd, "NAK\0", 4);
     goto thread_exit;
   }
 
-  pthread_mutex_lock(&mutex);
-  write(args.client_fd, &config, sizeof(PU_ConfigMessage));
-  pthread_mutex_unlock(&mutex);
+  /* Analizar comando depois de autenticar */
+  char *comando_buf = recv + 64;  
+  printf("comando_buf: %s\n", comando_buf);
 
-  printf("%10s:%-5d foi aceite!\n", ip_str, port);
+  /* Login */
+  if (0 == strncmp("login", comando_buf, 5)) {
+    printf("%10s:%-5d login...\n", ip_str, port);
+    pthread_mutex_lock(&mutex);
+    write(args.client_fd, &config, sizeof(PU_ConfigMessage));
+    pthread_mutex_unlock(&mutex);
+    printf("%10s:%-5d foi aceite!\n", ip_str, port);
+  } 
+  /* Config novo */
+  else if (0 == strncmp("newcfg", comando_buf, 6)) {
+    printf("%10s:%-5d newcfg...\n", ip_str, port);
+    write(args.client_fd, "ACK\0", 4);
+    PU_ConfigMessage new_config;
+    read(args.client_fd, &new_config, sizeof(new_config));
+    printf("%10s:%-5d enviou uma configuração nova!\n", ip_str, port);
+    memcpy(&config, &new_config, sizeof(new_config));
+
+    pthread_mutex_lock(&mutex);
+    write(multicast_sock, (void*) &config, sizeof(PU_ConfigMessage) );
+    pthread_mutex_unlock(&mutex);
+
+  }
+
+  write(args.client_fd, "NAK\0", 4);
 
   thread_exit:
   close(args.client_fd);
@@ -162,16 +187,19 @@ void *handle_client(void *arg) {
 }
 
 int main(int argc, char *argv[]) {
-  if (argc != 3) {
-    fputs("servidor: <tcp_bind_ip> <tcp_port>\n", stderr);
+  if (argc != 2) {
+    fputs("servidor: <tcp_port>\n", stderr);
     exit(EXIT_FAILURE);
   }
 
-  char *tcp_bind_ip = argv[1];
-  int tcp_port = atoi(argv[2]);
+  int tcp_port = atoi(argv[1]);
+  if (tcp_port < 0 || tcp_port > 65535) {
+    fputs("servidor: <tcp_port>\n", stderr);
+    exit(EXIT_FAILURE);
+  }
 
-  if (!setup_tcp(tcp_bind_ip, tcp_port, 10) ||
-      !setup_multicast(MULTICAST_GROUP, MULTICAST_PORT)) {
+  if (!setup_tcp(tcp_port, 128) ||
+      !setup_multicast()) {
     exit(EXIT_FAILURE);
   }
 

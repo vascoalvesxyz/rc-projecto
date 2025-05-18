@@ -1,5 +1,5 @@
-CC := gcc -std=c17 -D_POSIX_C_SOURCE=200809L
-FLAGS := -O2 -Wall -Wextra -Werror
+CC := gcc -std=c99 -D_POSIX_C_SOURCE=200809L
+FLAGS := -O2 
 DEBUG := -g -DDEBUG 
 
 .PHONY: all
@@ -10,5 +10,5 @@ debug: FLAGS += $(DEBUG)
 debug: all
 
 install: 
-	$(CC) $(FLAGS) cliente.c -o cliente
-	$(CC) $(FLAGS) servidor.c -o servidor
+	$(CC) $(FLAGS) -pthread cliente.c -o cliente
+	$(CC) $(FLAGS) -pthread servidor.c -o servidor

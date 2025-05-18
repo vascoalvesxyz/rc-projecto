@@ -48,12 +48,14 @@ typedef struct {
   int sv_sock;
   int mc_sock;
   int pu_sock;
+  int dest_sock;
 } global_t;
 
 static global_t global;
 static PU_ConfigMessage config = {0};
 static uint64_t current_seq = 0;
 static volatile sig_atomic_t running = 1;
+int packet_loss_percent = 0;
 
 /* Helpers */
 static void *thread_multicast_listener(void *arg);
@@ -70,6 +72,7 @@ void pu_close_protocol();
 int pu_request_protocol_config(PU_ConfigMessage new_config);
 int pu_send_message(const char *destination, const char *message, int len);
 int pu_receive_message(char *buffer, int bufsize);
+
 int pu_get_last_message_stats(int *retransmissions, int *delivery_time);
 void pu_inject_packet_loss(int probability);
 
@@ -83,6 +86,9 @@ static void *thread_receive_loop(void *arg) {
       buf[n] = '\0'; // garantir que termina com null
       printf("\n[Recebido] %s\n> ", buf);
       fflush(stdout);
+      continue;
+    } else {
+      /* NAK enviado */
     }
   }
 
@@ -285,107 +291,97 @@ int pu_init_protocol(const char *server_ip, int server_port, const char *psk) {
   return 0;
 }
 
+void pu_close_protocol() {
+  puts("Closing protocol...");
+  shutdown(global.mc_sock, SHUT_RDWR);
+  shutdown(global.pu_sock, SHUT_RDWR);
+  close(global.mc_sock);
+  close(global.pu_sock);
+}
+
 int pu_send_message(const char *destination, const char *message, int len) {
 
   int port = 0;
   char *host = parse_destination(destination, &port);
+  if (host == NULL) return -1;
 
-  int sockfd = socket(AF_INET, SOCK_DGRAM, 0);
-
-  struct sockaddr_in dest_addr;
-  memset(&dest_addr, 0, sizeof(struct sockaddr_in));
-  dest_addr.sin_family = AF_INET;
-  dest_addr.sin_port = htons(port);
-  inet_pton(AF_INET, host, &dest_addr.sin_addr);
-
-  if (inet_pton(AF_INET, host, &dest_addr.sin_addr) != 1) {
-    fputs("Invalid IP address format.\n", stderr);
+  /* abrir socket de destino etc, etc */
+  int destino_fd = socket(AF_INET, SOCK_DGRAM, 0);
+  if (destino_fd < 0) {
+    puts("Falha ao conectar ao destino. O IP está correcto?");
     return -1;
   }
 
-  assert(config.base_timeout > 0);
-  assert(config.max_retries > 0);
-
-  /* Construir pacote */
-  PU_Header header;
-  char      packet[sizeof(header) + len];
-  int       retries = 0;
-
-  struct timeval timeout = {0};
-  struct timeval now;
-
-  while (retries < config.max_retries) {
-
-    /* Timeout para o select (NÃO CONFUNDIR COM O TIMESTAMP) */
-    timeout = (struct timeval) {
-      .tv_sec  = config.base_timeout / 1000,
-      .tv_usec = (config.base_timeout % 1000) * 1000
-    };
-
-    /* timestamp */
-    gettimeofday(&now, NULL);
-    header.timestamp = now.tv_sec*1000000 + now.tv_usec;
-    header.sequence  = htonl(current_seq);
-    header.flag      = 0;
-
-    /* copiar header e calcular checksum */
-    memcpy(packet, &header, sizeof(header));
-    memcpy(packet + sizeof(header), message, len);
-    header.checksum = htons(pu_checksum_helper(packet, sizeof(header) + len));
-    memcpy(packet, &header, sizeof(header));
-
-    /* envio do packet */
-    if (sendto(sockfd, packet, sizeof(header)+len, 0, (struct sockaddr*)&dest_addr,
-               sizeof(dest_addr)) != (ssize_t)(sizeof(header)+len)) {
-      perror("sendto");
-      close(sockfd);
-      return -1;
-    }
-
-    /* Esperar resposta */
-    fd_set readset;
-    FD_ZERO(&readset);
-    FD_SET(sockfd, &readset);
-    int ready = select(sockfd+1, &readset, NULL, NULL, &timeout);
-
-    if (ready < 0) {
-      perror("select");
-      close(sockfd);
-      return -1;
-    } else if (ready == 0) {
-      retries++;
-      fprintf(stderr, "Timeout, retrying (%d/%d)\n", retries, config.max_retries);
-      continue;
-    }
-
-    /* berificar que recebemos um ACK */
-    PU_Header ack;
-    socklen_t addrlen = sizeof(dest_addr);
-    ssize_t recv_len = recvfrom(sockfd, &ack, sizeof(ack), 0, (struct sockaddr*)&dest_addr, &addrlen);
-
-    if (recv_len == (ssize_t)sizeof(ack) && PU_IS_ACK(ack.flag) && ntohl(ack.sequence) == current_seq) {
-      current_seq++;
-      close(sockfd);
-      return 0; 
-    }
-
-    /* ack invalido */
-    retries++;
-    fprintf(stderr, "Received non‑ACK or wrong seq, retrying (%d/%d)\n", retries, config.max_retries);
+  struct sockaddr_in dst = {0};
+  dst.sin_family = AF_INET;
+  dst.sin_port   = htons(port);
+  if (inet_pton(AF_INET, host, &dst.sin_addr) != 1) {
+    puts("IP inválido?");
+    close(destino_fd);
+    return -1;
   }
 
-  fprintf(stderr, "Max retries reached\n");
-  close(sockfd);
+  if (connect(destino_fd, (struct sockaddr*)&dst, sizeof(dst)) < 0) {
+    perror("connect: ");  /* diz exatamente o erro */
+    close(destino_fd);
+    return -1;
+  }
+
+  puts("Destino conectado com sucesso!");
+
+  /* preencher pacote */
+  PU_Header header = {0};
+  header.timestamp = pu_timestamp_helper();
+  header.sequence  = current_seq;
+  header.flag      = 0;
+
+  /* serializar */
+  char packet_serial[sizeof(header) + len];
+  /* copiar header e payload */
+  memcpy(packet_serial, &header, sizeof(header));
+  memcpy(packet_serial + sizeof(header), message, len);
+  /* calcular chekcsum e copiar header outra vez */
+  header.checksum  = pu_checksum_helper(packet_serial, sizeof(header) + len);
+  memcpy(packet_serial, &header, sizeof(header));
+
+  int       retries = 0;
+  PU_Header resposta = {0};
+  while (retries < config.max_retries) {
+    /* envio do packet */
+    write(destino_fd, packet_serial, sizeof(header)+len);
+    read(destino_fd, &resposta, sizeof(PU_Header)); /* esperar resposta */
+
+    /* berificar que recebemos um ACK */
+    if (PU_IS_ACK(resposta.flag)) {
+      puts("Mensagem enviada com sucesso!");
+      current_seq++; // sequencia enviada com sucesso
+      close(destino_fd);
+      return 0;
+    } 
+    else if (PU_IS_NAK(resposta.flag)) {
+      printf("Mensagem rejeitada... renviando... (%d/%d)\n", retries, config.max_retries);
+    } else {
+      printf("Resposta inválida?... desistindo... \n");
+      close(destino_fd);
+      return -1;
+    }
+
+    retries++;
+  } 
+
+  close(destino_fd);
+  puts("Tentativa máxima excedida");
   return -1;
 }
 
 int pu_receive_message(char *buffer, int bufsize) {
+
   struct sockaddr_in sender;
   socklen_t sender_len = sizeof(sender);
 
   char packet[sizeof(PU_Header) + bufsize];
-  ssize_t len = recvfrom(global.pu_sock, packet, sizeof(packet), 0,
-                         (struct sockaddr *)&sender, &sender_len);
+
+  ssize_t len = recvfrom(global.pu_sock, packet, sizeof(packet), 0, (struct sockaddr *)&sender, &sender_len);
 
   if (len <= 0) return -1;
 
@@ -397,16 +393,15 @@ int pu_receive_message(char *buffer, int bufsize) {
   PU_Header header;
   memcpy(&header, packet, sizeof(PU_Header));
 
-  uint32_t received_seq = ntohl(header.sequence); // converted de network a host
+  uint32_t received_seq = header.sequence; 
   uint16_t received_checksum = header.checksum;
 
   /* verificar chekcsum */
   header.checksum = 0;
   memcpy(packet, &header, sizeof(PU_Header));
-  uint16_t calculated = pu_checksum_helper(packet, len);
-  bool valid_checksum = (received_checksum == htons(calculated));
+  bool valid_checksum = (received_checksum == pu_checksum_helper(packet, len));
 
-  /* Fix 3: Proper sequence handling */
+  /* sequencia */
   static uint32_t expected_seq = 0;
   bool valid_sequence = true;
 
@@ -414,38 +409,48 @@ int pu_receive_message(char *buffer, int bufsize) {
     valid_sequence = (received_seq == expected_seq);
   }
 
-  // Prepare response
   PU_Header response = {
-    .sequence = htonl(received_seq), 
+    .sequence = received_seq, 
     .timestamp = header.timestamp,
     .flag = 0
   };
 
+  /* Injectar perda de pacotes */
+  if (packet_loss_percent > 0) {
+    int r = 1+(rand()%100);
+    if (r <= packet_loss_percent) 
+      puts("Packet loss foi injectado!");
+    valid_sequence = (r > packet_loss_percent) ;
+  }
+
+  /* Se o packet for valido, enviar ACK */
   if (valid_checksum && valid_sequence) {
     PU_SET_ACK(response.flag);
     int payload_len = len - sizeof(PU_Header);
     memcpy(buffer, packet + sizeof(PU_Header), payload_len);
 
     if (config.enable_sequence) 
-      expected_seq++; // Only increment on valid reception
+      expected_seq++; 
 
-    sendto(global.pu_sock, &response, sizeof(response), 0,
-           (struct sockaddr *)&sender, sender_len);
+    sendto(global.pu_sock, &response, sizeof(response), 0, (struct sockaddr *)&sender, sender_len);
     return payload_len;
-  } else {
+  } 
+  /* Se o packet for invalido, enviar NAK */
+  else {
+    #ifdef DEBUG
+    puts("[DEBUG] recieve message: NAK enviado.");
+    #endif /* ifdef DEBUG */
     PU_SET_NAK(response.flag);
-    sendto(global.pu_sock, &response, sizeof(response), 0,
-           (struct sockaddr *)&sender, sender_len);
+    sendto(global.pu_sock, &response, sizeof(response), 0, (struct sockaddr *)&sender, sender_len);
     return -1;
   }
+
+  return -1;
 }
 
-void pu_close_protocol() {
-  puts("Closing protocol...");
-  shutdown(global.mc_sock, SHUT_RDWR);
-  shutdown(global.pu_sock, SHUT_RDWR);
-  close(global.mc_sock);
-  close(global.pu_sock);
+void pu_inject_packet_loss(int probability) {
+  assert(probability >= 0 && probability <= 100);
+  packet_loss_percent = probability;
 }
 
 int main(int argc, char *argv[]) {
@@ -474,13 +479,15 @@ int main(int argc, char *argv[]) {
     exit(EXIT_FAILURE);
   }
 
+  pu_inject_packet_loss(30);
+
   /* Criar thread listeners */ 
   pthread_t multicast_listener;
   pthread_create(&multicast_listener, 0, thread_multicast_listener, NULL);
   pthread_t recv_thread;
   pthread_create(&recv_thread, NULL, thread_receive_loop, NULL);
 
-  /* Handle a sigint */
+  /* Handle sigint */
   struct sigaction sa = {.sa_handler = handle_sigint};
   sigemptyset(&sa.sa_mask);
   sigaction(SIGINT, &sa, NULL);

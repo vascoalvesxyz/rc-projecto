@@ -1,9 +1,4 @@
 !
-!
-!
-!
-!
-!
 
 !
 version 12.4
@@ -26,6 +21,7 @@ ip cef
 !
 !
 no ip domain lookup
+ip multicast-routing 
 !
 multilink bundle-name authenticated
 !
@@ -63,6 +59,7 @@ ip tcp synwait-time 5
 !
 interface FastEthernet0/0
  ip address 193.137.101.2 255.255.255.128
+ ip pim sparse-dense-mode
  duplex auto
  speed auto
 !
@@ -73,6 +70,7 @@ interface Serial0/0
 !
 interface FastEthernet0/1
  ip address 193.137.100.254 255.255.255.0
+ ip pim sparse-dense-mode
  duplex auto
  speed auto
 !
